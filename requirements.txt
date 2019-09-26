@@ -10,3 +10,5 @@ shapely
 boto3
 botocore
 pyproj
+oauthlib
+requests_oauthlib

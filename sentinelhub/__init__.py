@@ -24,6 +24,8 @@ from .download import DownloadRequest, download_data, get_json, get_xml, Downloa
 
 from .opensearch import get_tile_info_id, get_tile_info, get_area_dates, get_area_info
 
+from .session import Session
+
 from .io_utils import read_data, write_data
 from .os_utils import get_content_list, get_folder_list, get_file_list, make_folder, create_parent_folder, rename, size
 from .geo_utils import bbox_to_dimensions, bbox_to_resolution, get_image_dimension, to_utm_bbox, get_utm_bbox,\
