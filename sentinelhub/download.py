@@ -6,41 +6,21 @@ import logging
 import os
 import time
 import warnings
-import json
 import concurrent.futures
-from io import BytesIO
-from xml.etree import ElementTree
 
 import requests
 import boto3
-import numpy as np
-import tifffile as tiff
-from PIL import Image
 from botocore.exceptions import NoCredentialsError
 
 from .constants import MimeType, RequestType
 from .config import SHConfig
-from .io_utils import get_jp2_bit_depth, fix_jp2_image
 from .os_utils import create_parent_folder, sys_is_windows
+from .sentinelhub_session import SentinelHubSession
+from .decoding import decode_data, decode_sentinelhub_error_message
+from .exceptions import DownloadFailedException, AwsDownloadFailedException, ImageDecodingError
 
 
-warnings.simplefilter('ignore', Image.DecompressionBombWarning)
 LOGGER = logging.getLogger(__name__)
-
-
-class DownloadFailedException(Exception):
-    """ General exception which is raised whenever download fails
-    """
-
-
-class AwsDownloadFailedException(DownloadFailedException):
-    """ This exception is raised when download fails because of a missing file in AWS
-    """
-
-
-class ImageDecodingError(Exception):
-    """ This exception is raised when downloaded image is not properly decoded
-    """
 
 
 class DownloadRequest:
@@ -74,7 +54,8 @@ class DownloadRequest:
     GLOBAL_AWS_CLIENT = None
 
     def __init__(self, *, url=None, data_folder=None, filename=None, headers=None, request_type=RequestType.GET,
-                 post_values=None, save_response=True, return_data=True, data_type=MimeType.RAW, **properties):
+                 post_values=None, save_response=True, return_data=True, data_type=MimeType.RAW, redownload=False,
+                 session=None, **properties):
 
         self.url = url
         self.data_folder = data_folder
@@ -83,6 +64,8 @@ class DownloadRequest:
         self.post_values = post_values
         self.save_response = save_response
         self.return_data = return_data
+        self.redownload = redownload
+        self.session = session
 
         self.properties = properties
 
@@ -90,7 +73,6 @@ class DownloadRequest:
         self.data_type = MimeType(data_type)
 
         self.s3_client = None
-        self.will_download = True
         self.file_path = None
         self._set_file_path()
 
@@ -150,6 +132,11 @@ class DownloadRequest:
         """
         self.return_data = return_data
 
+    def is_download_required(self):
+        """ Checks if it should even download
+        """
+        return (self.save_response or self.return_data) and (self.redownload or not self.is_downloaded())
+
     def is_downloaded(self):
         """ Checks if data for this request has already been downloaded and is saved to disk.
 
@@ -169,7 +156,7 @@ class DownloadRequest:
         return self.url.startswith('s3://')
 
 
-def download_data(request_list, redownload=False, max_threads=None):
+def download_data(request_list, redownload=False, max_threads=None, raise_download_errors=False):
     """ Download all requested data or read data from disk, if already downloaded and available and redownload is
     not required.
 
@@ -185,27 +172,27 @@ def download_data(request_list, redownload=False, max_threads=None):
                 in the download request list.
     :rtype: list[concurrent.futures.Future]
     """
-    _check_if_must_download(request_list, redownload)
+    for request in request_list: # TODO
+        request.redownload = redownload
 
     LOGGER.debug("Using max_threads=%s for %s requests", max_threads, len(request_list))
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_threads) as executor:
-        return [executor.submit(execute_download_request, request) for request in request_list]
+        download_list = [executor.submit(execute_download_request, request) for request in request_list]
 
-
-def _check_if_must_download(request_list, redownload):
-    """ Updates request.will_download attribute of each request in request_list.
-
-    **Note:** the function mutates the elements of the list!
-
-    :param request_list: a list of ``DownloadRequest`` instances
-    :type request_list: list[DownloadRequest]
-    :param redownload: tells whether to download the data again or not
-    :type redownload: bool
-    """
-    for request in request_list:
-        request.will_download = (request.save_response or request.return_data) \
-                                and (not request.is_downloaded() or redownload)
+    data_list = []
+    for future in download_list:
+        try:
+            data_list.append(future.result(timeout=SHConfig().download_timeout_seconds))
+        except ImageDecodingError as err:
+            data_list.append(None)
+            LOGGER.debug('%s while downloading data; will try to load it from disk if it was saved', err)
+        except DownloadFailedException as download_exception:
+            if raise_download_errors:
+                raise download_exception
+            warnings.warn(str(download_exception))
+            data_list.append(None)
+    return data_list
 
 
 def execute_download_request(request):
@@ -221,7 +208,7 @@ def execute_download_request(request):
         raise ValueError('Data folder is not specified. '
                          'Please give a data folder name in the initialization of your request.')
 
-    if not request.will_download:
+    if not request.is_download_required():
         return None
 
     try_num = SHConfig().max_download_attempts
@@ -231,6 +218,14 @@ def execute_download_request(request):
             if request.is_aws_s3():
                 response = _do_aws_request(request)
                 response_content = response['Body'].read()
+            elif request.session:
+
+                session = request.session
+                response = session.post(json=request.post_values, headers=request.headers)
+
+                response.raise_for_status()
+                response_content = response.content
+
             else:
                 response = _do_request(request)
                 response.raise_for_status()
@@ -273,7 +268,7 @@ def _do_request(request):
     if request.request_type is RequestType.GET:
         return requests.get(request.url, headers=request.headers)
     if request.request_type is RequestType.POST:
-        return requests.post(request.url, data=json.dumps(request.post_values), headers=request.headers)
+        return requests.post(request.url, json=request.post_values, headers=request.headers)
     raise ValueError('Invalid request type {}'.format(request.request_type))
 
 
@@ -361,13 +356,7 @@ def _create_download_failed_message(exception, url):
             message += '\nThere might be a problem in connection or the server failed to process ' \
                        'your request. Please try again.'
     elif isinstance(exception, requests.HTTPError):
-        try:
-            server_message = ''
-            for elem in decode_data(exception.response.content, MimeType.XML):
-                if 'ServiceException' in elem.tag or 'Message' in elem.tag:
-                    server_message += elem.text.strip('\n\t ')
-        except ElementTree.ParseError:
-            server_message = exception.response.text
+        server_message = decode_sentinelhub_error_message(exception.response)
         message += '\nServer response: "{}"'.format(server_message)
 
     return message
@@ -387,71 +376,6 @@ def _save_if_needed(request, response_content):
         with open(file_path, 'wb') as file:
             file.write(response_content)
         LOGGER.debug('Saved data from %s to %s', request.url, file_path)
-
-
-def decode_data(response_content, data_type, entire_response=None):
-    """ Interprets downloaded data and returns it.
-
-    :param response_content: downloaded data (i.e. json, png, tiff, xml, zip, ... file)
-    :type response_content: bytes
-    :param data_type: expected downloaded data type
-    :type data_type: constants.MimeType
-    :param entire_response: A response obtained from execution of download request
-    :type entire_response: requests.Response or dict or None
-    :return: downloaded data
-    :rtype: numpy array in case of image data type, or other possible data type
-    :raises: ValueError
-    """
-    LOGGER.debug('data_type=%s', data_type)
-
-    if data_type is MimeType.JSON:
-        if isinstance(entire_response, requests.Response):
-            return entire_response.json()
-        return json.loads(response_content.decode('utf-8'))
-    if MimeType.is_image_format(data_type):
-        return decode_image(response_content, data_type)
-    if data_type is MimeType.XML or data_type is MimeType.GML or data_type is MimeType.SAFE:
-        return ElementTree.fromstring(response_content)
-
-    try:
-        return {
-            MimeType.RAW: response_content,
-            MimeType.TXT: response_content,
-            MimeType.REQUESTS_RESPONSE: entire_response,
-            MimeType.ZIP: BytesIO(response_content)
-        }[data_type]
-    except KeyError:
-        raise ValueError('Unknown response data type {}'.format(data_type))
-
-
-def decode_image(data, image_type):
-    """ Decodes the image provided in various formats, i.e. png, 16-bit float tiff, 32-bit float tiff, jp2
-    and returns it as an numpy array
-
-    :param data: image in its original format
-    :type data: any of possible image types
-    :param image_type: expected image format
-    :type image_type: constants.MimeType
-    :return: image as numpy array
-    :rtype: numpy array
-    :raises: ImageDecodingError
-    """
-    bytes_data = BytesIO(data)
-    if image_type.is_tiff_format():
-        image = tiff.imread(bytes_data)
-    else:
-        image = np.array(Image.open(bytes_data))
-
-        if image_type is MimeType.JP2:
-            try:
-                bit_depth = get_jp2_bit_depth(bytes_data)
-                image = fix_jp2_image(image, bit_depth)
-            except ValueError:
-                pass
-
-    if image is None:
-        raise ImageDecodingError('Unable to decode image')
-    return image
 
 
 def get_json(url, post_values=None, headers=None):

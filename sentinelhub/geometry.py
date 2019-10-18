@@ -26,7 +26,7 @@ class BaseGeometry(ABC):
     def __getattr__(self, attr):
         """ Using shapely's svg geometry visualization for Jupyter notebooks
         """
-        if attr == '_repr_svg_':
+        if attr == '_repr_svg_':  # TODO: move to self._repr_svg_
             return getattr(self.geometry, attr)
         return super().__getattribute__(attr)
 

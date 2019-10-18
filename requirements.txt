@@ -10,4 +10,7 @@ shapely
 boto3
 botocore
 pyproj
+oauthlib
+requests_oauthlib
+pyjwt
 aenum>=2.1.4

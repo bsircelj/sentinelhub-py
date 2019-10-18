@@ -93,7 +93,7 @@ class SafeProduct(AwsProduct):
         :rtype: list((str, str))
         """
         datastrips = self.product_info['datastrips']
-        return [(self.get_datastrip_name(datastrip['id']), self.base_url + datastrip['path'])
+        return [(self.get_datastrip_name(datastrip['id']), '{}/{}'.format(self.base_url, datastrip['path']))
                 for datastrip in datastrips]
 
     def get_datastrip_name(self, datastrip):

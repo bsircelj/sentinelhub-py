@@ -141,7 +141,6 @@ def parse_time_interval(time):
     * `YYYY-MM-DDThh:mm:ss` -> `[YYYY-MM-DDThh:mm:ss, YYYY-MM-DDThh:mm:ss]`
     * list or tuple of two dates in form `YYYY-MM-DD` -> `[YYYY-MM-DDT00:00:00, YYYY-MM-DDT23:59:59]`
     * list or tuple of two dates in form `YYYY-MM-DDThh:mm:ss` -> `[YYYY-MM-DDThh:mm:ss, YYYY-MM-DDThh:mm:ss]`,
-    * `None` -> `[default_start_date from config.json, current date]`
 
     All input times can also be specified as `datetime` objects. Instances of `datetime.date` will be treated as
     `YYYY-MM-DD` and instance of `datetime.datetime` will be treated as `YYYY-MM-DDThh:mm:ss`.
@@ -152,20 +151,20 @@ def parse_time_interval(time):
     :rtype: (str, str)
     :raises: ValueError
     """
-    if time is None or time is OgcConstants.LATEST:
-        date_interval = (SHConfig().default_start_date, get_current_date())
+    if time is OgcConstants.LATEST:
+        date_interval = '1985-01-01', get_current_date()
+    elif isinstance(time, (str, datetime.date)):
+        parsed_time = parse_time(time)
+        date_interval = parsed_time, parsed_time
+    elif isinstance(time, (tuple, list)) and len(time) == 2:
+        date_interval = parse_time(time[0]), parse_time(time[1])
     else:
-        if isinstance(time, (str, datetime.date)):
-            date_interval = (parse_time(time), ) * 2
-        elif isinstance(time, (tuple, list)) and len(time) == 2:
-            date_interval = (parse_time(time[0]), parse_time(time[1]))
-        else:
-            raise ValueError('Time must be a string/datetime object or tuple/list of 2 strings/datetime objects')
+        raise ValueError('Time must be a string/datetime object or tuple/list of 2 strings/datetime objects')
 
     if 'T' not in date_interval[0]:
-        date_interval = (date_interval[0] + 'T00:00:00', date_interval[1])
+        date_interval = date_interval[0] + 'T00:00:00', date_interval[1]
     if 'T' not in date_interval[1]:
-        date_interval = (date_interval[0], date_interval[1] + 'T23:59:59')
+        date_interval = date_interval[0], date_interval[1] + 'T23:59:59'
 
     if date_interval[1] < date_interval[0]:
         raise ValueError('Start of time interval is larger than end of time interval')

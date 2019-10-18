@@ -115,11 +115,11 @@ class AwsService(ABC):
         :return: base url string
         :rtype: str
         """
-        base_url = SHConfig().aws_metadata_url.rstrip('/') if force_http else 's3:/'
+        base_url = SHConfig().aws_metadata_url if force_http else 's3:/'
         aws_bucket = SHConfig().aws_s3_l1c_bucket if self.data_source is DataSource.SENTINEL2_L1C else \
             SHConfig().aws_s3_l2a_bucket
 
-        return '{}/{}/'.format(base_url, aws_bucket)
+        return '{}/{}'.format(base_url, aws_bucket)
 
     def get_safe_type(self):
         """ Determines the type of ESA product.
@@ -240,7 +240,7 @@ class AwsService(ABC):
         :rtype: str, str
         """
         props = (url[len(self.base_url):] if url.startswith(self.base_url) else
-                 url[len(self.base_http_url):]).split('/')
+                 url[len(self.base_http_url):]).lstrip('/').split('/')
         if props[0] == 'products':
             tile_props = props[:5]
             props = props[5:]
@@ -420,7 +420,7 @@ class AwsProduct(AwsService):
         :rtype: str
         """
         base_url = self.base_http_url if force_http else self.base_url
-        return '{}products/{}/{}'.format(base_url, self.date.replace('-', '/'), self.product_id)
+        return '{}/products/{}/{}'.format(base_url, self.date.replace('-', '/'), self.product_id)
 
     def get_tile_url(self, tile_info):
         """ Collects tile url from `productInfo.json` file.
@@ -617,8 +617,8 @@ class AwsTile(AwsService):
         :rtype: str
         """
         base_url = self.base_http_url if force_http else self.base_url
-        url = '{}tiles/{}/{}/{}/'.format(base_url, self.tile_name[0:2].lstrip('0'), self.tile_name[2],
-                                         self.tile_name[3:5])
+        url = '{}/tiles/{}/{}/{}/'.format(base_url, self.tile_name[0:2].lstrip('0'), self.tile_name[2],
+                                          self.tile_name[3:5])
         date_params = self.date.split('-')
         for param in date_params:
             url += param.lstrip('0') + '/'

@@ -5,20 +5,21 @@ Main module for collecting data
 import datetime
 import os
 import logging
-import warnings
 import copy
 from abc import ABC, abstractmethod
 
+from .api import ApiImageService
 from .ogc import OgcImageService
 from .fis import FisService
 from .geopedia import GeopediaWmsService, GeopediaImageService
+from .geometry import BBox, Geometry
 from .aws import AwsProduct, AwsTile
 from .aws_safe import SafeProduct, SafeTile
-from .download import download_data, ImageDecodingError, DownloadFailedException
+from .download import download_data
+from .exceptions import DownloadFailedException
 from .io_utils import read_data
 from .os_utils import make_folder
 from .constants import DataSource, MimeType, CustomUrlParam, ServiceType, CRS, HistogramType
-from .config import SHConfig
 
 LOGGER = logging.getLogger(__name__)
 
@@ -157,18 +158,8 @@ class DataRequest(ABC):
         else:
             raise ValueError('data_filter parameter must be a list of indices')
 
-        data_list = []
-        for future in download_data(filtered_download_list, redownload=redownload, max_threads=max_threads):
-            try:
-                data_list.append(future.result(timeout=SHConfig().download_timeout_seconds))
-            except ImageDecodingError as err:
-                data_list.append(None)
-                LOGGER.debug('%s while downloading data; will try to load it from disk if it was saved', err)
-            except DownloadFailedException as download_exception:
-                if raise_download_errors:
-                    raise download_exception
-                warnings.warn(str(download_exception))
-                data_list.append(None)
+        data_list = download_data(filtered_download_list, redownload=redownload, max_threads=max_threads,
+                                  raise_download_errors=raise_download_errors)
 
         if is_repeating_filter:
             data_list = [copy.deepcopy(data_list[index]) for index in mapping_list]
@@ -362,6 +353,66 @@ class OgcRequest(DataRequest):
         :rtype: Iterator[dict] or None
         """
         return self.wfs_iterator
+
+
+class ApiRequest(OgcRequest):
+    """ Sentinel Hub API request class
+
+    TODO: don't inherit from OgcRequest
+    TODO: naming - ShRequest, SHRequest, SentinelHubRequest
+    """
+
+    def __init__(self, evalscript, *, bbox=None, geometry=None, time='latest', service_type=None,
+                 data_source=DataSource.SENTINEL2_L1C,
+                 size_x=None, size_y=None, maxcc=1.0, image_format=MimeType.PNG, custom_url_params=None,
+                 time_difference=datetime.timedelta(seconds=-1), session=None, instance_id=None, **kwargs):
+
+        self.evalscript = evalscript
+        self.session = session
+        self.geometry = geometry
+
+        self._check_geo(bbox, geometry)
+
+        self.image_format = MimeType(image_format)
+        if not self.image_format.is_api_format():
+            raise ValueError('Image format {} is not one of supported formats of Sentinel Hub '
+                              'API'.format(self.image_format))
+
+        # TODO: instead of data_source it should be data_sources or data_source_dict? A dictionary with parameters
+
+        super().__init__('', bbox=bbox, time=time, service_type=service_type, data_source=data_source,
+                         size_x=size_x, size_y=size_y, maxcc=maxcc, image_format=image_format,
+                         custom_url_params=custom_url_params, time_difference=time_difference, instance_id=instance_id,
+                         **kwargs)
+
+    @staticmethod
+    def _check_geo(bbox, geometry):
+        if bbox is None and geometry is None:
+            raise ValueError("At least one of parameters 'bbox' and 'geometry' has to be given")
+
+        if bbox and not isinstance(bbox, BBox):
+            raise ValueError('Bounding box has to be of type sentinelhub.BBox')
+        if geometry and not isinstance(geometry, Geometry):
+            raise ValueError('Geometry has to be of type sentinelhub.Geometry')
+
+        if bbox and geometry and bbox.crs is not geometry.crs:
+            raise ValueError('Bounding box and geometry should have the same CRS, but {} and {} '
+                             'found'.format(bbox.crs, geometry.crs))
+
+    def create_request(self, reset_wfs_iterator=False):
+        """ TODO: this is the same as in OgcRequest
+        """
+        if reset_wfs_iterator:
+            self.wfs_iterator = None
+
+        ogc_service = ApiImageService(instance_id=self.instance_id)
+        self.download_list = ogc_service.get_request(self)
+        self.wfs_iterator = ogc_service.get_wfs_iterator()
+
+    def get_dates(self):
+        """ TODO: this is the same as in OgcRequest
+        """
+        return ApiImageService(instance_id=self.instance_id).get_dates(self)
 
 
 class WmsRequest(OgcRequest):

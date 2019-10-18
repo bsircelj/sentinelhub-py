@@ -3,7 +3,7 @@ This module lists all externally useful classes and functions
 """
 
 from .data_request import WmsRequest, WcsRequest, FisRequest, GeopediaWmsRequest, GeopediaImageRequest, \
-    AwsTileRequest, AwsProductRequest, get_safe_format, download_safe_format
+    AwsTileRequest, AwsProductRequest, ApiRequest, get_safe_format, download_safe_format
 
 from .aws import AwsProduct, AwsTile
 from .aws_safe import SafeProduct, SafeTile
@@ -31,5 +31,12 @@ from .geo_utils import bbox_to_dimensions, bbox_to_resolution, get_image_dimensi
 from .time_utils import next_date, prev_date, get_current_date
 
 from .testing_utils import TestSentinelHub, TestCaseContainer
+
+from .sentinelhub_client import SentinelHubClient
+from .sentinelhub_session import SentinelHubSession
+
+from .sentinelhub_request import body, bounds, data, output, response
+
+from .time_utils import parse_time_interval
 
 from ._version import __version__

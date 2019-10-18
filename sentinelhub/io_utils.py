@@ -188,6 +188,7 @@ def write_data(filename, data, data_format=None, compress=False, add=False):
 
     try:
         return {
+            MimeType.RAW: write_bytes,
             MimeType.CSV: write_csv,
             MimeType.JSON: write_json,
             MimeType.XML: write_xml,
@@ -306,6 +307,17 @@ def write_numpy(filename, data):
     :type data: numpy array
     """
     return np.save(filename, data)
+
+
+def write_bytes(filename, data):
+    """ Write binary data into a file
+
+    :param filename:
+    :param data:
+    :return:
+    """
+    with open(filename, 'wb') as file:
+        file.write(data)
 
 
 def get_data_format(filename):
