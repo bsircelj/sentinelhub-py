@@ -1,22 +1,19 @@
 """
 Module for working with Sentinel Hub OGC services
 """
-
 import logging
 import datetime
 from base64 import b64encode
 from urllib.parse import urlencode
 
 import shapely.geometry
-import shapely.wkt
-import shapely.ops
 
-from .constants import ServiceType, DataSource, MimeType, CRS, OgcConstants, CustomUrlParam
+from .constants import ServiceType, DataSource, MimeType, CRS, SHConstants, CustomUrlParam
 from .config import SHConfig
 from .geo_utils import get_image_dimension
 from .geometry import BBox, Geometry
 from .download import DownloadRequest, get_json
-from .time_utils import parse_time_interval
+from .time_utils import parse_time_interval, filter_times
 
 LOGGER = logging.getLogger(__name__)
 
@@ -24,45 +21,18 @@ LOGGER = logging.getLogger(__name__)
 class OgcService:
     """ The base class for Sentinel Hub OGC services
     """
-    def __init__(self, base_url=None, instance_id=None):
+    def __init__(self, config=None):
         """
-        :param base_url: base url of Sentinel Hub's OGC services. If `None`, the url specified in the configuration
-                    file is taken.
-        :type base_url: str or None
-        :param instance_id: user's instance id granting access to Sentinel Hub's OGC services. If `None`, the instance
-            ID specified in the configuration file is taken.
-        :type instance_id: str or None
+        :param config: A custom instance of config class to override parameters from the saved configuration.
+        :type config: SHConfig or None
         """
-        self.base_url = SHConfig().ogc_base_url if not base_url else base_url
-        self.instance_id = SHConfig().instance_id if not instance_id else instance_id
+        self.config = config or SHConfig()
+        self._base_url = self.config.get_sh_ogc_url()
 
-        if not self.instance_id:
+        if not self.config.instance_id:
             raise ValueError('Instance ID is not set. '
                              'Set it either in request initialization or in configuration file. '
                              'Check http://sentinelhub-py.readthedocs.io/en/latest/configure.html for more info.')
-
-    @staticmethod
-    def _filter_dates(dates, time_difference):
-        """ Filters out dates within time_difference, preserving only the oldest date.
-
-        :param dates: a list of datetime objects
-        :param time_difference: a ``datetime.timedelta`` representing the time difference threshold
-        :return: an ordered list of datetimes `d1<=d2<=...<=dn` such that `d[i+1]-di > time_difference`
-        :rtype: list(datetime.datetime)
-        """
-
-        LOGGER.debug("dates=%s", dates)
-
-        if len(dates) <= 1:
-            return dates
-
-        sorted_dates = sorted(dates)
-
-        separate_dates = [sorted_dates[0]]
-        for curr_date in sorted_dates[1:]:
-            if curr_date - separate_dates[-1] > time_difference:
-                separate_dates.append(curr_date)
-        return separate_dates
 
     @staticmethod
     def _sentinel1_product_check(product_id, data_source):
@@ -91,12 +61,8 @@ class OgcImageService(OgcService):
     """
     def __init__(self, **kwargs):
         """
-        :param base_url: base url of Sentinel Hub's OGC services. If `None`, the url specified in the configuration
-                    file is taken.
-        :type base_url: str or None
-        :param instance_id: user's instance id granting access to Sentinel Hub's OGC services. If `None`, the instance
-            ID specified in the configuration file is taken.
-        :type instance_id: str or None
+        :param config: A custom instance of config class to override parameters from the saved configuration.
+        :type config: SHConfig or None
         """
         super().__init__(**kwargs)
 
@@ -115,8 +81,7 @@ class OgcImageService(OgcService):
         """
         size_x, size_y = self.get_image_dimensions(request)
         return [DownloadRequest(url=self.get_url(request=request, date=date, size_x=size_x, size_y=size_y),
-                                filename=self.get_filename(request, date, size_x, size_y),
-                                data_type=request.image_format, headers=OgcConstants.HEADERS)
+                                data_type=request.image_format, headers=SHConstants.HEADERS)
                 for date in self.get_dates(request)]
 
     def get_url(self, request, *, date=None, size_x=None, size_y=None, geometry=None):
@@ -136,7 +101,7 @@ class OgcImageService(OgcService):
         :rtype: str
         """
         url = self.get_base_url(request)
-        authority = self.instance_id if hasattr(self, 'instance_id') else request.theme
+        authority = request.theme if hasattr(request, 'theme') else self.config.instance_id
 
         params = self._get_common_url_parameters(request)
         if request.service_type in (ServiceType.WMS, ServiceType.WCS):
@@ -158,14 +123,16 @@ class OgcImageService(OgcService):
         :return: base string for url to Sentinel Hub's OGC service for this product.
         :rtype: str
         """
-        url = self.base_url + request.service_type.value
+        url = '{}/{}'.format(self._base_url, request.service_type.value)
         # These 2 lines are temporal and will be removed after the use of uswest url wont be required anymore:
-        if hasattr(request, 'data_source') and request.data_source.is_uswest_source():
+        if hasattr(request, 'data_source') and request.data_source.is_uswest_source(config=self.config):
             url = 'https://services-uswest2.sentinel-hub.com/ogc/{}'.format(request.service_type.value)
 
-        if hasattr(request, 'data_source') and request.data_source not in DataSource.get_available_sources():
-            raise ValueError("{} is not available for service at ogc_base_url={}".format(request.data_source,
-                                                                                         SHConfig().ogc_base_url))
+        if hasattr(request, 'data_source') and \
+                request.data_source not in DataSource.get_available_sources(config=self.config):
+            raise ValueError("{} is not available for service at service available at {}. Try"
+                             "changing 'sh_base_url' parameter in package configuration "
+                             "file".format(request.data_source, SHConfig().get_sh_ogc_url()))
         return url
 
     @staticmethod
@@ -315,87 +282,6 @@ class OgcImageService(OgcService):
 
         return params
 
-    @staticmethod
-    def get_filename(request, date, size_x, size_y):
-        """ Get filename location
-
-        Returns the filename's location on disk where data is or is going to be stored.
-        The files are stored in the folder specified by the user when initialising OGC-type
-        of request. The name of the file has the following structure:
-
-        {service_type}_{layer}_{crs}_{bbox}_{time}_{size_x}X{size_y}_*{custom_url_params}.{image_format}
-
-        In case of `TIFF_d32f` a `'_tiff_depth32f'` is added at the end of the filename (before format suffix)
-        to differentiate it from 16-bit float tiff.
-
-        :param request: OGC-type request with specified bounding box, cloud coverage for specific product.
-        :type request: OgcRequest or GeopediaRequest
-        :param date: acquisition date or None
-        :type date: datetime.datetime or None
-        :param size_x: horizontal image dimension
-        :type size_x: int or str
-        :param size_y: vertical image dimension
-        :type size_y: int or str
-        :return: filename for this request and date
-        :rtype: str
-        """
-        filename = '_'.join([
-            str(request.service_type.value),
-            request.layer,
-            str(request.bbox.crs),
-            str(request.bbox).replace(',', '_'),
-            '' if date is None else date.strftime("%Y-%m-%dT%H-%M-%S"),
-            '{}X{}'.format(size_x, size_y)
-        ])
-
-        filename = OgcImageService.filename_add_custom_url_params(filename, request)
-
-        return OgcImageService.finalize_filename(filename, request.image_format)
-
-    @staticmethod
-    def filename_add_custom_url_params(filename, request):
-        """ Adds custom url parameters to filename string
-
-        :param filename: Initial filename
-        :type filename: str
-        :param request: OGC-type request with specified bounding box, cloud coverage for specific product.
-        :type request: OgcRequest or GeopediaRequest
-        :return: Filename with custom url parameters in the name
-        :rtype: str
-        """
-        if hasattr(request, 'custom_url_params') and request.custom_url_params is not None:
-            for param, value in sorted(request.custom_url_params.items(),
-                                       key=lambda parameter_item: parameter_item[0].value):
-                filename = '_'.join([filename, param.value, str(value)])
-
-        return filename
-
-    @staticmethod
-    def finalize_filename(filename, file_format=None):
-        """ Replaces invalid characters in filename string, adds image extension and reduces filename length
-
-        :param filename: Incomplete filename string
-        :type filename: str
-        :param file_format: Format which will be used for filename extension
-        :type file_format: MimeType
-        :return: Final filename string
-        :rtype: str
-        """
-        for char in [' ', '/', '\\', '|', ';', ':', '\n', '\t']:
-            filename = filename.replace(char, '')
-
-        if file_format:
-            suffix = str(file_format.value)
-            if file_format.is_tiff_format() and file_format is not MimeType.TIFF:
-                suffix = str(MimeType.TIFF.value)
-                filename = '_'.join([filename, str(file_format.value).replace(';', '_')])
-
-            filename = '.'.join([filename[:254 - len(suffix)], suffix])
-
-        LOGGER.debug("filename=%s", filename)
-
-        return filename  # Even in UNIX systems filename must have at most 255 bytes
-
     def get_dates(self, request):
         """ Get available Sentinel-2 acquisitions at least time_difference apart
 
@@ -415,22 +301,17 @@ class OgcImageService(OgcService):
         if DataSource.is_timeless(request.data_source):
             return [None]
 
-        date_interval = parse_time_interval(request.time)
-
-        LOGGER.debug('date_interval=%s', date_interval)
-
         if request.wfs_iterator is None:
-            self.wfs_iterator = WebFeatureService(request.bbox, date_interval, data_source=request.data_source,
-                                                  maxcc=request.maxcc, base_url=self.base_url,
-                                                  instance_id=self.instance_id)
+            self.wfs_iterator = WebFeatureService(request.bbox, request.time, data_source=request.data_source,
+                                                  maxcc=request.maxcc, config=self.config)
         else:
             self.wfs_iterator = request.wfs_iterator
 
-        dates = sorted(set(self.wfs_iterator.get_dates()))
+        dates = self.wfs_iterator.get_dates()
+        dates = filter_times(dates, request.time_difference)
 
-        if request.time is OgcConstants.LATEST:
-            dates = dates[-1:]
-        return OgcService._filter_dates(dates, request.time_difference)
+        LOGGER.debug('Initializing requests for dates: %s', dates)
+        return dates
 
     @staticmethod
     def get_image_dimensions(request):
@@ -481,12 +362,8 @@ class WebFeatureService(OgcService):
         :type data_source: constants.DataSource
         :param maxcc: Maximum accepted cloud coverage of an image. Float between 0.0 and 1.0. Default is 1.0.
         :type maxcc: float
-        :param base_url: base url of Sentinel Hub's OGC services. If `None`, the url specified in the configuration
-                        file is taken.
-        :type base_url: str or None
-        :param instance_id: user's instance id granting access to Sentinel Hub's OGC services. If `None`, the instance
-            ID specified in the configuration file is taken.
-        :type instance_id: str or None
+        :param config: A custom instance of config class to override parameters from the saved configuration.
+        :type config: SHConfig or None
         """
         super().__init__(**kwargs)
 
@@ -498,6 +375,8 @@ class WebFeatureService(OgcService):
         self.tile_list = []
         self.index = 0
         self.feature_offset = 0
+        self.latest_time_only = time_interval == SHConstants.LATEST
+        self.max_features_per_request = 1 if self.latest_time_only else SHConfig().max_wfs_records_per_query
 
     def __iter__(self):
         """ Iteration method
@@ -529,20 +408,17 @@ class WebFeatureService(OgcService):
         :return: dictionary containing info about product tiles
         :rtype: dict
         """
-        if self.feature_offset is None:
-            return
-
-        main_url = '{}{}/{}?'.format(self.base_url, ServiceType.WFS.value, self.instance_id)
+        main_url = '{}/{}/{}?'.format(self._base_url, ServiceType.WFS.value, self.config.instance_id)
 
         params = {'SERVICE': ServiceType.WFS.value,
                   'REQUEST': 'GetFeature',
-                  'TYPENAMES': DataSource.get_wfs_typename(self.data_source),
+                  'TYPENAMES': DataSource.get_wfs_typename(self.data_source, config=self.config),
                   'BBOX': str(self.bbox.reverse()) if self.bbox.crs is CRS.WGS84 else str(self.bbox),
                   'OUTPUTFORMAT': MimeType.get_string(MimeType.JSON),
                   'SRSNAME': CRS.ogc_string(self.bbox.crs),
                   'TIME': '{}/{}'.format(self.time_interval[0], self.time_interval[1]),
                   'MAXCC': 100.0 * self.maxcc,
-                  'MAXFEATURES': SHConfig().max_wfs_records_per_query,
+                  'MAXFEATURES': self.max_features_per_request,
                   'FEATURE_OFFSET': self.feature_offset}
 
         url = main_url + urlencode(params)
@@ -559,10 +435,10 @@ class WebFeatureService(OgcService):
             else:
                 self.tile_list.append(tile_info)
 
-        if len(response["features"]) < SHConfig().max_wfs_records_per_query:
+        if len(response["features"]) < self.max_features_per_request or self.latest_time_only:
             self.feature_offset = None
         else:
-            self.feature_offset += SHConfig().max_wfs_records_per_query
+            self.feature_offset += self.max_features_per_request
 
     def get_dates(self):
         """ Returns a list of acquisition times from tile info data

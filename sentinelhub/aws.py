@@ -9,7 +9,9 @@ from abc import ABC, abstractmethod
 
 from .config import SHConfig
 from .constants import AwsConstants, EsaSafeType, MimeType, DataSource
-from .download import DownloadRequest, get_json, AwsDownloadFailedException
+from .download import DownloadRequest
+from .download.aws_client import get_aws_json
+from .exceptions import AwsDownloadFailedException, SHUserWarning
 from .opensearch import get_tile_info, get_tile_info_id
 from .time_utils import parse_time
 
@@ -25,7 +27,7 @@ MAX_SUPPORTED_BASELINES = {
 class AwsService(ABC):
     """ Amazon Web Service (AWS) base class
     """
-    def __init__(self, parent_folder='', bands=None, metafiles=None):
+    def __init__(self, parent_folder='', bands=None, metafiles=None, config=None):
         """
         :param parent_folder: Folder where the fetched data will be saved.
         :type parent_folder: str
@@ -35,10 +37,13 @@ class AwsService(ABC):
                           (e.g. ``['metadata', 'tileInfo', 'preview/B01', 'TCI']``).
                           If parameter is set to `None` the list will be set automatically.
         :type metafiles: list(str) or None
+        :param config: A custom instance of config class to override parameters from the saved configuration.
+        :type config: SHConfig or None
         """
         self.parent_folder = parent_folder
         self.bands = self._parse_bands(bands)
         self.metafiles = self._parse_metafiles(metafiles)
+        self.config = config or SHConfig()
 
         self.download_list = []
         self.folder_list = []
@@ -115,11 +120,11 @@ class AwsService(ABC):
         :return: base url string
         :rtype: str
         """
-        base_url = SHConfig().aws_metadata_url.rstrip('/') if force_http else 's3:/'
-        aws_bucket = SHConfig().aws_s3_l1c_bucket if self.data_source is DataSource.SENTINEL2_L1C else \
-            SHConfig().aws_s3_l2a_bucket
+        base_url = self.config.aws_metadata_url if force_http else 's3://'
+        aws_bucket = self.config.aws_s3_l1c_bucket if self.data_source is DataSource.SENTINEL2_L1C else \
+            self.config.aws_s3_l2a_bucket
 
-        return '{}/{}/'.format(base_url, aws_bucket)
+        return '{}{}{}'.format(base_url, '' if base_url.endswith('/') else '/', aws_bucket)
 
     def get_safe_type(self):
         """ Determines the type of ESA product.
@@ -152,10 +157,11 @@ class AwsService(ABC):
             baseline = '{}.{}'.format(baseline[:2], baseline[2:])
 
             if baseline > MAX_SUPPORTED_BASELINES[self.data_source]:
-                warnings.warn('Products with baseline {} are not officially supported in sentinelhub-py. If you notice '
-                              'any errors in naming structure of downloaded data please report an issue at '
-                              'https://github.com/sentinel-hub/sentinelhub-py/issues. Pull requests are also very '
-                              'appreciated'.format(baseline))
+                message = 'Products with baseline {} are not officially supported in sentinelhub-py. If you notice ' \
+                          'any errors in naming structure of downloaded data please report an issue at ' \
+                          'https://github.com/sentinel-hub/sentinelhub-py/issues. Pull requests are also very ' \
+                          'appreciated'.format(baseline)
+                warnings.warn(message, category=SHUserWarning)
 
             return baseline
         return self._read_baseline_from_info()
@@ -240,7 +246,7 @@ class AwsService(ABC):
         :rtype: str, str
         """
         props = (url[len(self.base_url):] if url.startswith(self.base_url) else
-                 url[len(self.base_http_url):]).split('/')
+                 url[len(self.base_http_url):]).lstrip('/').split('/')
         if props[0] == 'products':
             tile_props = props[:5]
             props = props[5:]
@@ -310,6 +316,8 @@ class AwsProduct(AwsService):
                           (e.g. ``['metadata', 'tileInfo', 'preview/B01', 'TCI']``).
                           If parameter is set to `None` the list will be set automatically.
         :type metafiles: list(str) or None
+        :param config: A custom instance of config class to override parameters from the saved configuration.
+        :type config: SHConfig or None
         """
         self.product_id = product_id.split('.')[0]
         self.tile_list = self.parse_tile_list(tile_list)
@@ -321,7 +329,7 @@ class AwsProduct(AwsService):
 
         self.date = self.get_date()
         self.product_url = self.get_product_url()
-        self.product_info = get_json(self.get_url(AwsConstants.PRODUCT_INFO))
+        self.product_info = get_aws_json(self.get_url(AwsConstants.PRODUCT_INFO))
 
         self.baseline = self.get_baseline()
 
@@ -420,7 +428,7 @@ class AwsProduct(AwsService):
         :rtype: str
         """
         base_url = self.base_http_url if force_http else self.base_url
-        return '{}products/{}/{}'.format(base_url, self.date.replace('-', '/'), self.product_id)
+        return '{}/products/{}/{}'.format(base_url, self.date.replace('-', '/'), self.product_id)
 
     def get_tile_url(self, tile_info):
         """ Collects tile url from `productInfo.json` file.
@@ -468,6 +476,8 @@ class AwsTile(AwsService):
                           (e.g. ``['metadata', 'tileInfo', 'preview/B01', 'TCI']``).
                           If parameter is set to `None` the list will be set automatically.
         :type metafiles: list(str) or None
+        :param config: A custom instance of config class to override parameters from the saved configuration.
+        :type config: SHConfig or None
         """
         self.tile_name = self.parse_tile_name(tile_name)
         self.datetime = self.parse_datetime(time)
@@ -590,7 +600,7 @@ class AwsTile(AwsService):
         :return: dictionary with tile information
         :rtype: dict
         """
-        return get_json(self.get_url(AwsConstants.TILE_INFO))
+        return get_aws_json(self.get_url(AwsConstants.TILE_INFO))
 
     def get_url(self, filename):
         """
@@ -617,8 +627,8 @@ class AwsTile(AwsService):
         :rtype: str
         """
         base_url = self.base_http_url if force_http else self.base_url
-        url = '{}tiles/{}/{}/{}/'.format(base_url, self.tile_name[0:2].lstrip('0'), self.tile_name[2],
-                                         self.tile_name[3:5])
+        url = '{}/tiles/{}/{}/{}/'.format(base_url, self.tile_name[0:2].lstrip('0'), self.tile_name[2],
+                                          self.tile_name[3:5])
         date_params = self.date.split('-')
         for param in date_params:
             url += param.lstrip('0') + '/'

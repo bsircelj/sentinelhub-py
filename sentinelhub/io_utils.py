@@ -5,7 +5,6 @@ Utility functions to read/write image data from/to file
 import csv
 import json
 import os
-import struct
 import logging
 import warnings
 from xml.etree import ElementTree
@@ -14,6 +13,7 @@ import numpy as np
 import tifffile as tiff
 from PIL import Image
 
+from .decoding import decode_tar, get_data_format, fix_jp2_image, get_jp2_bit_depth
 from .constants import MimeType
 from .os_utils import create_parent_folder
 
@@ -44,6 +44,10 @@ def read_data(filename, data_format=None):
     if not isinstance(data_format, MimeType):
         data_format = get_data_format(filename)
 
+    if data_format is MimeType.RAW:
+        with open(filename, 'rb') as file:
+            return file.read()
+
     if data_format.is_tiff_format():
         return read_tiff_image(filename)
     if data_format is MimeType.JP2:
@@ -52,6 +56,7 @@ def read_data(filename, data_format=None):
         return read_image(filename)
     try:
         return {
+            MimeType.TAR: read_tar,
             MimeType.TXT: read_text,
             MimeType.CSV: read_csv,
             MimeType.JSON: read_json,
@@ -61,6 +66,13 @@ def read_data(filename, data_format=None):
         }[data_format](filename)
     except KeyError:
         raise ValueError('Reading data format .{} is not supported'.format(data_format.value))
+
+
+def read_tar(filename):
+    """ Read a tar from file
+    """
+    with open(filename, 'rb') as file:
+        return decode_tar(file.read())
 
 
 def read_tiff_image(filename):
@@ -188,6 +200,7 @@ def write_data(filename, data, data_format=None, compress=False, add=False):
 
     try:
         return {
+            MimeType.RAW: write_bytes,
             MimeType.CSV: write_csv,
             MimeType.JSON: write_json,
             MimeType.XML: write_xml,
@@ -308,59 +321,12 @@ def write_numpy(filename, data):
     return np.save(filename, data)
 
 
-def get_data_format(filename):
-    """ Util function to guess format from filename extension
+def write_bytes(filename, data):
+    """ Write binary data into a file
 
-    :param filename: name of file
-    :type filename: str
-    :return: file extension
-    :rtype: MimeType
+    :param filename:
+    :param data:
+    :return:
     """
-    fmt_ext = filename.split('.')[-1]
-    return MimeType(MimeType.canonical_extension(fmt_ext))
-
-
-def get_jp2_bit_depth(stream):
-    """ Reads bit encoding depth of jpeg2000 file in binary stream format
-
-    :param stream: binary stream format
-    :type stream: Binary I/O (e.g. io.BytesIO, io.BufferedReader, ...)
-    :return: bit depth
-    :rtype: int
-    """
-    stream.seek(0)
-    while True:
-        read_buffer = stream.read(8)
-        if len(read_buffer) < 8:
-            raise ValueError('Image Header Box not found in Jpeg2000 file')
-
-        _, box_id = struct.unpack('>I4s', read_buffer)
-
-        if box_id == b'ihdr':
-            read_buffer = stream.read(14)
-            params = struct.unpack('>IIHBBBB', read_buffer)
-            return (params[3] & 0x7f) + 1
-
-
-def fix_jp2_image(image, bit_depth):
-    """ Because Pillow library incorrectly reads JPEG 2000 images with 15-bit encoding this function corrects the
-    values in image.
-
-    :param image: image read by opencv library
-    :type image: numpy array
-    :param bit_depth: bit depth of jp2 image encoding
-    :type bit_depth: int
-    :return: corrected image
-    :rtype: numpy array
-    """
-    if bit_depth in [8, 16]:
-        return image
-    if bit_depth == 15:
-        try:
-            return image >> 1
-        except TypeError:
-            raise IOError('Failed to read JPEG 2000 image correctly. Most likely reason is that Pillow did not '
-                          'install OpenJPEG library correctly. Try reinstalling Pillow from a wheel')
-
-    raise ValueError('Bit depth {} of jp2 image is currently not supported. '
-                     'Please raise an issue on package Github page'.format(bit_depth))
+    with open(filename, 'wb') as file:
+        file.write(data)
