@@ -123,6 +123,7 @@ class DataSourceMeta(EnumMeta):
 
         The method raises a ValueError if the 'something' does not match the format expected for collection id.
         """
+        # pylint: disable=signature-differs
         if not isinstance(collection_id, str):
             return super().__call__(collection_id, *args, **kwargs)
 
@@ -226,7 +227,7 @@ class DataSource(Enum, metaclass=DataSourceMeta):
             cls.LANDSAT5: 'L5.TILE',
             cls.LANDSAT7: 'L7.TILE',
             cls.SENTINEL3: 'S3.TILE',
-            cls.SENTINEL5P: 'S5p_L2.TILE',
+            cls.SENTINEL5P: 'S5p_L2.TILE' if is_eocloud else 'DSS7',
             cls.ENVISAT_MERIS: 'ENV.TILE',
             cls.SENTINEL2_L3B: 'SEN4CAP_S2L3B.TILE',
             cls.LANDSAT8_L2A: 'SEN4CAP_L8L2A.TILE'
@@ -340,7 +341,7 @@ class DataSource(Enum, metaclass=DataSourceMeta):
         return [cls.SENTINEL2_L1C, cls.SENTINEL2_L2A, cls.SENTINEL1_IW, cls.SENTINEL1_EW, cls.SENTINEL1_EW_SH,
                 cls.SENTINEL1_IW_ASC, cls.SENTINEL1_EW_ASC, cls.SENTINEL1_EW_SH_ASC, cls.SENTINEL1_IW_DES,
                 cls.SENTINEL1_EW_DES, cls.SENTINEL1_EW_SH_DES, cls.DEM, cls.MODIS, cls.LANDSAT8,
-                *cls.get_custom_sources()]
+                cls.SENTINEL5P, *cls.get_custom_sources()]
 
     @classmethod
     def get_custom_sources(cls):
@@ -377,6 +378,7 @@ class CRSMeta(EnumMeta):
     def __call__(cls, crs_value, *args, **kwargs):
         """ This is executed whenever CRS('something') is called
         """
+        # pylint: disable=signature-differs
         crs_value = cls._parse_crs(crs_value)
 
         if isinstance(crs_value, str) and not cls.has_value(crs_value) and crs_value.isdigit() and len(crs_value) >= 4:
@@ -394,13 +396,12 @@ class CRSMeta(EnumMeta):
         - {'init': 32633}
         - pyproj.CRS(32743)
         """
-        # pylint: disable=unsupported-membership-test
         if isinstance(value, dict) and 'init' in value:
             value = value['init']
         if isinstance(value, pyproj.CRS):
             if value == CRSMeta._UNSUPPORTED_CRS:
-                raise ValueError(f'sentinelhub-py supports only WGS 84 coordinate reference system with '
-                                 f'coordinate order lng-lat. However pyproj.CRS(4326) has coordinate order lat-lng')
+                raise ValueError('sentinelhub-py supports only WGS 84 coordinate reference system with '
+                                 'coordinate order lng-lat. However pyproj.CRS(4326) has coordinate order lat-lng')
 
             value = value.to_epsg()
 
@@ -558,6 +559,7 @@ class CustomUrlParam(Enum):
     TRANSPARENT = 'Transparent'
     BGCOLOR = 'BgColor'
     GEOMETRY = 'Geometry'
+    MINQA = 'MinQA'
 
     @classmethod
     def has_value(cls, value):
